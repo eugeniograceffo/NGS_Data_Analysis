@@ -1,0 +1,1075 @@
+---
+title: "NGS Oncology: impact of low DNA input and tumor purity"
+author: "Eugenio Graceffo"
+date: "June-July 2024"
+output:
+  html_document:
+    toc: True
+    toc_float: True
+    df_print: paged
+---
+## 
+**Project 1**: what is the impact of low amount of DNA as starting material? \
+**Project 2**: what is the impact of tumor purity on the detected mutations?
+
+
+
+```{r echo=TRUE, message=FALSE, warning=FALSE, paged.print=FALSE, results='hide'}
+#load libraries
+library(tidyverse)
+library(readr)
+library(dplyr)
+library(ggplot2)
+library(plotly)
+library(matrixStats)
+library(ggrepel)
+library(scales)
+library(ggpubr)
+library(readxl)
+
+library(xml2)
+library(XML)
+
+
+library(data.table)
+
+library(pheatmap)
+
+```
+
+
+
+# Data input
+## PASS mutations count from .vcf
+
+First, lets extract the number of detected PASS mutations from the .vcf files
+```{r}
+## set the directory where the vcf file are
+path_to_sequencing_folder <- "C:/Users/user1/Desktop/OncoPanel_project/Sequencing_Data"
+
+
+# initialize an empty dataframe for PASS counts
+vcf_mutation_counts <- data_frame("Sample"=character(),
+                   "num_mutations"=double()) 
+
+# initialize an empty data frame for the Mutations ID dataframe
+vcf_mutation_ID <- data_frame("mutation_ID"=character()) 
+
+
+for (x in list.files(path_to_sequencing_folder)) {
+  
+  muton_path <- paste0(path_to_sequencing_folder,"/", x, "/REPORT_", x, "/muton.vcf")
+  table_sample <- fread(muton_path) ## vcf file
+  table_sample_filtered <- filter(table_sample, table_sample$FILTER == "PASS") ## get only positive mutations
+  
+  ## mutation COUNTS df
+  new_row <- c(x, nrow(table_sample_filtered)) ## generate a new row to add to the output dataframe
+  vcf_mutation_counts <- rbind(vcf_mutation_counts, new_row)  ## append to dataframe
+  
+  ## mutation ID df
+  sample_name <- as.character(x)
+  table_sample_filtered_ID <- table_sample_filtered %>%
+    unite("mutation_ID", c(1,2,4,5), remove = FALSE) %>% ## generates a column with a unique ID specific to the mutation
+    select(mutation_ID)
+  
+  table_sample_filtered_ID[[sample_name]] <- TRUE
+  
+  vcf_mutation_ID <- full_join(vcf_mutation_ID, table_sample_filtered_ID, by= "mutation_ID", )  ## append to dataframe
+}
+
+
+
+
+## rename column names
+vcf_mutation_counts <-rename(vcf_mutation_counts, Sample = 1)
+vcf_mutation_counts <- rename(vcf_mutation_counts, num_mutations = 2)
+
+## adjust values type
+vcf_mutation_counts$num_mutations <- as.double(vcf_mutation_counts$num_mutations)
+
+vcf_mutation_counts
+
+
+## code for individual loading
+#muton_vcf <- fread("C:/Users/user1/Desktop/T03_original_data/REPORT_03/fusion.vcf")
+#muton_vcf
+
+#filtered_vcf <- muton_vcf %>%
+  #filter(muton_vcf$FILTER == "PASS")
+
+#filtered_vcf
+
+vcf_mutation_ID
+
+
+```
+
+
+
+## Total counts from report.xml
+```{r}
+# initialize an empty dataframe
+QC_total_counts <- data_frame() 
+
+
+for (x in list.files(path_to_sequencing_folder)) {
+  
+  QC_path <- paste0(path_to_sequencing_folder,"/", x, "/report.xml")
+  QC_data <- read_xml(QC_path)
+  QC_xml <- xmlParse(QC_data)
+  df_QC <- xmlToDataFrame(nodes = getNodeSet(QC_xml, "//report/qc-results/tumor"))  ## extract the node containing the QC info
+  QC_total_counts <- rbind(QC_total_counts,df_QC)  ##append to dataframe
+
+  
+}
+
+## adjust the values type
+QC_total_counts$total_reads <- as.double(gsub(",", "", QC_total_counts$total_reads))
+QC_total_counts$`mapping-rate` <- as.double(QC_total_counts$`mapping-rate`)
+QC_total_counts$Duplication_rate <- as.double(QC_total_counts$`duplication-rate`)
+QC_total_counts$total_reads <- as.double(QC_total_counts$total_reads)
+
+QC_total_counts <- QC_total_counts %>%
+  mutate(reads_name = paste0(QC_total_counts$reads_name, "_N03")) %>% ## add the missing "_N03" to match sample names in other dataframes
+  rename(Sample = reads_name) %>%
+  select(-panel, -reagent, -run_date, -`duplication-rate`)
+
+
+
+QC_total_counts
+
+
+```
+
+
+## Counts used for pipeline from validation.xml
+```{r}
+# initialize an empty dataframe
+Unique_counts <- data_frame() 
+
+
+for (x in list.files(path_to_sequencing_folder)) {
+  
+  Validation_path <- paste0(path_to_sequencing_folder,"/", x, "/validation.xml")
+  Validation_data <- read_xml(Validation_path)
+  Validation_xml <- xmlParse(Validation_data)
+  df_validation <- xmlToDataFrame(nodes = getNodeSet(Validation_xml, "//report/metrics_target_regions/reads"))  ## extract the node containing the QC info
+  new_row_validation <- c(x, df_validation$text) ## generate a new row to add to the output dataframe
+  Unique_counts <- rbind(Unique_counts,new_row_validation)  ##append to dataframe
+
+  
+}
+
+## rename column names
+Unique_counts <-rename(Unique_counts, Sample = 1)
+Unique_counts <- rename(Unique_counts, unique_reads = 2)
+
+
+## adjust the values type
+Unique_counts$unique_reads <- as.double(gsub(",", "", Unique_counts$unique_reads))
+Unique_counts$unique_reads <- as.double(Unique_counts$unique_reads)
+
+Unique_counts
+
+
+```
+
+
+## Metadata info .xlsx
+```{r}
+# load the metadata info
+metadata <- read_excel("metadata.xlsx")
+metadata
+```
+
+```{r}
+df <- metadata%>%
+  inner_join(vcf_mutation_counts) %>%
+  inner_join(QC_total_counts) %>%
+  inner_join(Unique_counts)
+
+df
+```
+
+## AF Extrapolation from muton.vcf
+### Dataframes containing AF values 
+
+First, lets load up all the .vcf files into a list of dataframes
+```{r}
+
+# initialize an empty list of dataframes
+dataframe_list <- list()
+
+for (x in list.files(path_to_sequencing_folder)) {
+  
+  muton_path <- paste0(path_to_sequencing_folder,"/", x, "/REPORT_", x, "/muton.vcf")
+  table_sample <- fread(muton_path) ## vcf file
+  table_sample$Sample <- x  ## creates a column with the sample name
+  table_sample <- select(table_sample, -(str_remove(x, "_N03")))
+  new_row <- c(x, nrow(table_sample_filtered)) ## generate a new row to add to the output dataframe
+
+  dataframe_list[[x]] <- table_sample  ## add dataframe to the list
+  
+}
+
+```
+
+
+### AF Extrapolation function
+Lets write a function to expand the INFO tab containing the AF values into more columns
+```{r}
+## function to expand INFO tab
+expand_info_tab <- function(vcf_file){
+  vcf_file %>%
+  unite("mutation_ID", c(1,2,4,5), remove = FALSE) %>% ## generates a column with a unique ID specific to the mutation
+  separate_rows(INFO, sep = ";") %>% ## extracts info from cell and spreads it over dataframe
+  separate(INFO, c('col1', 'col2'), sep = '=') %>% ## separates the key and the value of the dictionary
+  pivot_wider(names_from = col1, values_from = col2) ## puts the key as column names on the original dataframe
+
+}
+
+```
+
+### For loop for extrapolation and function application
+And use the function to extract the AF values for all the dataframes
+```{r}
+
+df_AF_expanded <- data_frame() 
+
+for (x in list.files(path_to_sequencing_folder)) {
+  muton_vcf <- dataframe_list[[x]]
+  muton_vcf_expanded <- expand_info_tab(muton_vcf) 
+  
+  #＃adjust column type
+  muton_vcf_expanded$AF <- as.double(muton_vcf_expanded$AF)
+  muton_vcf_expanded$FPV <- as.double(muton_vcf_expanded$FPV)
+  muton_vcf_expanded$FQV <- as.double(muton_vcf_expanded$FQV)
+  muton_vcf_expanded$DP <- as.double(muton_vcf_expanded$DP)
+  
+
+  df_AF_expanded <- rbind(df_AF_expanded, muton_vcf_expanded)  ## append to dataframe
+  
+}
+
+df_AF_expanded
+
+
+```
+
+### Adding metadata information
+```{r}
+df_AF_total <- metadata%>%
+  inner_join(df_AF_expanded) %>%
+  select(-Total_DNA) %>%
+  separate(Sample_name, into = "Total_DNA", extra = "drop",  remove = FALSE) 
+
+df_AF_final <- df_AF_total %>%
+  filter(Ratio_experiment == "yes")
+
+## adjust types for graphing
+df_AF_final$Total_DNA <- factor(df_AF_final$Total_DNA, levels = c("200ng", "50ng", "30ng"))
+df_AF_final$Tumor_percentage <- factor(df_AF_final$Tumor_percentage, levels = c("100_%", "50_%", "25_%"))
+
+
+
+df_AF_final
+```
+
+
+
+# Project 1: Impact of lower amounts of DNA
+
+```{r}
+DNA_experiment <- df %>%
+  filter(Tumor_percentage == "100_%" ) %>%
+  arrange(desc(Total_DNA))
+
+
+
+DNA_experiment
+
+```
+
+## Total reads
+
+```{r}
+
+## graph the combined results
+ggscatter(DNA_experiment, x= "Total_DNA", y="total_reads",
+          color = "black", shape = , size = 3,
+          add = "reg.line",
+          add.params = list(color = "gray", fill = "lightgray", linetype= "solid"),
+          conf.int = TRUE,
+          cor.coef = TRUE,
+          cor.coeff.args = list(method = "pearson", label.sep ="\n", label.x= 90, label.y = 47500000),
+          cor.coef.size = 5,
+          title = "Impact on total reads",
+          
+          ) +
+  ylab("Total number of reads") +
+  xlab("Total ng of DNA") +
+  scale_x_continuous(breaks=c(15, 30, 50, 100, 150, 200)) +
+  theme(plot.title = element_text(hjust = 0.5)) +
+  geom_hline(yintercept = 45000000, linetype = "dashed", color = "red", linewidth= 0.7) +
+  geom_text(aes(181, 45000000, label = "Threshold 45M", vjust = -1), color = "red")
+
+
+
+## graph the individual results
+ggscatter(DNA_experiment, x= "Total_DNA", y="total_reads",
+          color = "black", shape = , size = 3, facet.by = "Experimenter",
+          add = "reg.line",
+          add.params = list(color = "gray", fill = "lightgray", linetype= "solid"),
+          conf.int = TRUE,
+          cor.coef = TRUE,
+          cor.coeff.args = list(method = "pearson", label.sep ="\n", label.x= 90, label.y = 48500000),
+          cor.coef.size = 5,
+          title = "Impact on total reads",
+          
+          ) +
+  ylab("Total number of reads") +
+  xlab("Total ng of DNA") +
+  scale_x_continuous(breaks=c(15, 30, 50, 100, 150, 200)) +
+  theme(plot.title = element_text(hjust = 0.5)) +
+  geom_hline(yintercept = 45000000, linetype = "dashed", color = "red", linewidth= 0.7) +
+  geom_text(aes(181, 45000000, label = "Threshold 45M", vjust = -1), color = "red")
+  
+```
+
+## Unique reads
+
+```{r}
+
+## graph the combined results
+ggscatter(DNA_experiment, x= "Total_DNA", y="unique_reads",
+          color = "black", shape = , size = 3,
+          add = "reg.line",
+          add.params = list(color = "gray", fill = "lightgray", linetype= "solid"),
+          conf.int = TRUE,
+          cor.coef = TRUE,
+          cor.coeff.args = list(method = "pearson", label.sep ="\n", label.x= 90, label.y = 30500000),
+          cor.coef.size = 5,
+          title = "Impact on unique reads used for OncoPanel pipeline",
+          
+          ) +
+  ylab("Total number of unique reads") +
+  xlab("Total ng of DNA") +
+  scale_x_continuous(breaks=c(15, 30, 50, 100, 150, 200)) +
+  theme(plot.title = element_text(hjust = 0.5)) +
+  geom_hline(yintercept = 45000000, linetype = "dashed", color = "red", linewidth= 0.7) +
+  geom_text(aes(170, 40000000, label = "Threshold 45M", vjust = -1), color = "red")
+
+
+
+## graph the individual results
+ggscatter(DNA_experiment, x= "Total_DNA", y="unique_reads",
+          color = "black", shape = , size = 3, facet.by = "Experimenter",
+          add = "reg.line",
+          add.params = list(color = "gray", fill = "lightgray", linetype= "solid"),
+          conf.int = TRUE,
+          cor.coef = TRUE,
+          cor.coeff.args = list(method = "pearson", label.sep ="\n", label.x= 90, label.y = 30500000),
+          cor.coef.size = 5,
+          title = "Impact on unique reads used for OncoPanel pipeline",
+          
+          ) +
+  ylab("Total number of unique reads") +
+  xlab("Total ng of DNA") +
+  scale_x_continuous(breaks=c(15, 30, 50, 100, 150, 200)) +
+  theme(plot.title = element_text(hjust = 0.5)) +
+  geom_hline(yintercept = 45000000, linetype = "dashed", color = "red", linewidth= 0.7) +
+  geom_text(aes(170, 40000000, label = "Threshold 45M", vjust = -1), color = "red")
+  
+```
+
+
+
+## Duplication rate
+
+```{r}
+
+## graph the combined results
+ggscatter(DNA_experiment, x= "Total_DNA", y="Duplication_rate",
+          color = "black", shape = , size = 3,
+          add = "reg.line",
+          add.params = list(color = "blue", fill = "lightgray"),
+          conf.int = TRUE,
+          cor.coef = TRUE,
+          cor.coeff.args = list(method = "pearson", label.sep ="\n", label.x= 90, label.y = 50 ),
+          cor.coef.size = 5,
+          title = "Impact on duplication rate",
+         # facet.by = "Experimenter"
+          
+          ) +
+  ylab("Percentage of duplicate reads") +
+  xlab("Total ng of DNA") +
+  scale_x_continuous(breaks=c(15, 30, 50, 100, 150, 200)) +
+  theme(plot.title = element_text(hjust = 0.5))
+
+
+## graph the individual results
+ggscatter(DNA_experiment, x= "Total_DNA", y="Duplication_rate",
+          color = "black", shape = , size = 3,
+          add = "reg.line",
+          add.params = list(color = "blue", fill = "lightgray"),
+          conf.int = TRUE,
+          cor.coef = TRUE,
+          cor.coeff.args = list(method = "pearson", label.sep ="\n", label.x= 90, label.y = 95 ),
+          cor.coef.size = 5,
+          title = "Impact on duplication rate",
+          facet.by = "Experimenter"
+          
+          ) +
+  ylab("Percentage of duplicate reads") +
+  xlab("Total ng of DNA") +
+  scale_x_continuous(breaks=c(15, 30, 50, 100, 150, 200)) +
+  theme(plot.title = element_text(hjust = 0.5))
+```
+
+## Number of detected PASS mutations
+
+
+```{r}
+
+## graph the combined results
+ggscatter(DNA_experiment, x= "Total_DNA", y="num_mutations",
+          color = "black", shape = , size = 3,
+          add = "reg.line",
+          add.params = list(color = "blue", fill = "lightgray"),
+          conf.int = TRUE,
+          cor.coef = TRUE,
+          cor.coeff.args = list(method = "pearson", label.sep ="\n", label.x= 90, label.y = 300 ),
+          cor.coef.size = 5,
+          title = "Impact on PASS mutation detection",
+         # facet.by = "Experimenter"
+          
+          ) +
+  ylab("Total number of detected PASS mutations") +
+  xlab("Total ng of DNA") +
+  scale_x_continuous(breaks=c(15, 30, 50, 100, 150, 200)) +
+  theme(plot.title = element_text(hjust = 0.5))
+
+
+## graph the individual results
+ggscatter(DNA_experiment, x= "Total_DNA", y="num_mutations",
+          color = "black", shape = , size = 3,
+          add = "reg.line",
+          add.params = list(color = "blue", fill = "lightgray"),
+          conf.int = TRUE,
+          cor.coef = TRUE,
+          cor.coeff.args = list(method = "pearson", label.sep ="\n", label.x= 90, label.y = 310 ),
+          cor.coef.size = 5,
+          title = "Impact on PASS mutation detection",
+          facet.by = "Experimenter"
+          
+          ) +
+  ylab("Total number of detected PASS mutations") +
+  xlab("Total ng of DNA") +
+  scale_x_continuous(breaks=c(15, 30, 50, 100, 150, 200)) +
+  theme(plot.title = element_text(hjust = 0.5))
+```
+
+## Mutations detected in lower amount of DNA samples
+What are the mutations detected in 15ng that are not detected in 200 ng?
+```{r}
+vcf_mutation_ID
+
+vcf_mutation_ID_15ng_vs_200ng <- vcf_mutation_ID %>%
+  mutate("15ng" = ifelse((EG_15ng_N03 == TRUE | TS_15ng_N03 == TRUE), TRUE, FALSE)) %>%
+  mutate("200ng" = ifelse((EG_200ng_N03 == TRUE | TS_200ng_N03 == TRUE), TRUE, FALSE)) %>%
+  select(mutation_ID, "15ng", "200ng") %>%
+  filter(`15ng`)  ## removes row that only contain NA (meaning the mutation was detected at 30ng or 50ng)
+
+
+vcf_mutation_ID_15ng_vs_200ng
+
+vcf_mutation_ID_15ng_ONLY <- vcf_mutation_ID_15ng_vs_200ng %>%
+  filter(is.na(`200ng`)) 
+
+vcf_mutation_ID_15ng_ONLY
+
+```
+
+
+
+
+## 15ng vs 200ng
+### What FILTER do the mutations not found in 200ng get assigned?
+```{r}
+#df_AF_total
+
+#vcf_mutation_ID_15ng_ONLY
+
+mutations_ID_GENE_names <- df_AF_total %>%
+  select(mutation_ID,GENE) %>%
+  unique()
+
+mutations_15ng_ONLY <- left_join(vcf_mutation_ID_15ng_ONLY,df_AF_total) %>%
+  filter(Tumor_percentage =="100_%") %>%
+  select(mutation_ID,GENE, Total_DNA, FILTER) %>%
+  filter(Total_DNA == "200ng") %>%
+  unique()
+
+mutations_15ng_ONLY
+
+
+summarized_mutations_15ng_ONLY <- mutations_15ng_ONLY %>%
+  group_by(FILTER) %>%
+  summarize(count = n())
+
+summarized_mutations_15ng_ONLY
+```
+
+
+### Do all of these 15ng-only mutations get assigned a SOURCE_ID?
+```{r}
+mutations_15ng_ONLY_SOURCE_ID <- df_AF_total %>%
+  filter(Total_DNA == "200ng" | Total_DNA == "15ng", Tumor_percentage =="100_%", FILTER == "PASS") %>%
+  select(mutation_ID,Total_DNA, Experimenter, SOURCE_ID) %>%
+  group_by(mutation_ID, Total_DNA) %>%
+  summarize(SOURCE_ID_str = paste0(SOURCE_ID, collapse = "_")) %>%
+  filter(SOURCE_ID_str != "NA" & SOURCE_ID_str != "NA_NA") %>%
+  pivot_wider(names_from = "Total_DNA", values_from = "SOURCE_ID_str", names_prefix = "SOURCE_ID_")
+
+mutations_15ng_ONLY_SOURCE_ID <- mutations_ID_GENE_names %>%
+  right_join(vcf_mutation_ID_15ng_ONLY) %>%
+  left_join(mutations_15ng_ONLY_SOURCE_ID) %>%
+  arrange(SOURCE_ID_15ng)
+
+mutations_15ng_ONLY_SOURCE_ID
+
+
+```
+### Is there a difference in the mean AF value on these mutations?
+```{r}
+mutations_15ng_ONLY_mean_AF <- df_AF_total %>%
+  filter(Total_DNA == "200ng" | Total_DNA == "15ng", Tumor_percentage =="100_%", FILTER == "PASS") %>%
+  select(mutation_ID,Total_DNA, Experimenter, AF) %>%
+  group_by(mutation_ID, Total_DNA) %>%
+  summarize(AF_mean = mean(AF)) %>%
+  pivot_wider(names_from = "Total_DNA", values_from = "AF_mean", names_prefix = "mean_AF_") %>%
+  arrange(desc(mean_AF_200ng)) %>%
+  left_join(mutations_ID_GENE_names) %>%
+  relocate(GENE, .after = "mutation_ID")
+
+mutations_15ng_ONLY_mean_AF
+
+mutations_15ng_ONLY_mean_AF <- df_AF_total %>%
+  filter(Total_DNA == "200ng" | Total_DNA == "15ng", Tumor_percentage =="100_%", FILTER == "PASS") %>%
+  select(mutation_ID,Total_DNA, Experimenter, AF) %>%
+  group_by(mutation_ID, Total_DNA) %>%
+  summarize(AF_mean = mean(AF)) 
+
+mutations_15ng_ONLY_mean_AF$Total_DNA <- factor(mutations_15ng_ONLY_mean_AF$Total_DNA, levels = c("200ng", "15ng"))
+
+
+gghistogram(mutations_15ng_ONLY_mean_AF, x = "AF_mean",
+   add = "mean", rug = TRUE, add_density = FALSE,
+   bins = 50,
+   color = "Total_DNA", fill = "Total_DNA",
+   palette = c("#383F51", "#F6E27F")
+   )
+
+```
+
+### What are the AF values of the 4 15ng-only mutations that are assigned SOURCE_ID?
+```{r}
+mutations_15ng_ONLY_SOURCE_ID %>%
+  filter(!is.na(SOURCE_ID_15ng)) %>%
+  inner_join(mutations_15ng_ONLY_mean_AF)
+
+```
+
+
+
+# Project 2: Impact of tumor purity
+## FILTER type exploration
+### Distribution of main FILTER types
+
+```{r}
+# Summarize data by "Sample"
+summarized_df <- df_AF_final %>%
+  group_by(Total_DNA, Tumor_percentage, Experimenter) %>%
+  dplyr::count(FILTER, name = "counts") %>%
+  ungroup() %>%
+  group_by(Total_DNA, Tumor_percentage,FILTER) %>%
+  summarize(mean_counts = mean(counts))
+
+## add category "Other" for low counts
+summarized_df <- summarized_df %>%
+  mutate(FILTER_new = ifelse(FILTER %in% c("LongHomopolymer", "PASS"), FILTER, "Other" )) %>%
+  mutate(FILTER_new = factor(FILTER_new, levels = c("Other", "LongHomopolymer", "PASS"))) ## reorder the values descending
+
+summarized_df
+
+```
+
+
+```{r}
+
+ggbarplot(summarized_df, x = "Tumor_percentage", y = "mean_counts", fill = "FILTER_new", color = "FILTER_new",
+          palette = c("#40798C", "#CFD7C7", "#70A9A1" ),
+          facet.by = "Total_DNA") +
+    ylab("average counts (n=2)")
+
+
+```
+
+### What are the PASS mutation of 100% tumor purity that are lost in lower purity samples?
+```{r}
+
+## combine replicates and different amounts of starting DNA to see which mutations has been detected in each percentage 
+vcf_mutation_ID_100percent_vs_rest <- vcf_mutation_ID %>%
+  mutate("100_%" = ifelse((EG_200ng_N03 == TRUE | TS_200ng_N03 == TRUE | EG_15ng_N03 == TRUE | TS_15ng_N03 == TRUE| EG_50ng_N03 == TRUE | TS_50ng_N03 == TRUE | EG_30ng_N03 == TRUE | TS_30ng_N03 == TRUE), TRUE, FALSE)) %>%
+  mutate("50_%" = ifelse((`EG_1-2-200ng_N03` == TRUE | `TS_1-2-200ng_N03` == TRUE | `EG_1-2-50ng_N03` == TRUE | `TS_1-2-50ng_N03` == TRUE| `EG_1-2-30ng_N03` == TRUE | `TS_1-2-30ng_N03` == TRUE), TRUE, FALSE)) %>%
+  mutate("25_%" = ifelse((`EG_1-4-200ng_N03` == TRUE | `TS_1-4-200ng_N03` == TRUE | `EG_1-4-50ng_N03` == TRUE | `TS_1-4-50ng_N03` == TRUE| `EG_1-4-30ng_N03` == TRUE | `TS_1-4-30ng_N03` == TRUE), TRUE, FALSE))%>%
+  select(mutation_ID, "100_%", "50_%", "25_%") %>%
+  filter(rowSums(is.na(.)) > 0) %>%  ## removes mutations that have been detected in all 3 percentages
+  left_join(mutations_ID_GENE_names, by = "mutation_ID") %>% ## add GENE information
+  relocate(GENE, .before = mutation_ID) %>%
+  arrange(`100_%`)
+  
+vcf_mutation_ID_100percent_vs_rest
+
+## mutations are either not detected at all or assigned other filters than PASS
+
+
+```
+```{r}
+vcf_mutation_ID_100percent_ONLY <- vcf_mutation_ID_100percent_vs_rest %>%
+  filter(`100_%` & is.na(`50_%`)) %>%
+  filter(is.na(`25_%`))
+
+
+
+mutation_ID_100percent_ONLY <- df_AF_total %>%
+  select(mutation_ID,GENE, Tumor_percentage, FILTER) %>%
+  filter(Tumor_percentage != "100_%") %>%
+  unique() %>%
+  pivot_wider(names_from = Tumor_percentage, values_from = FILTER, names_prefix = "FILTER_") %>%
+  right_join(vcf_mutation_ID_100percent_ONLY)
+
+mutation_ID_100percent_ONLY
+
+
+
+summarized_mutation_ID_100percent_ONLY <- mutation_ID_100percent_ONLY %>%
+  pivot_longer(c(`FILTER_50_%`, `FILTER_25_%`),names_to = "FILTER_percentage", values_to = "FILTER" ) %>%
+  group_by(FILTER) %>%
+  summarize(count = n()) %>%
+  mutate(percentage = round((count / sum(count)) * 100, 0)) %>%
+  select(-count) %>%
+  arrange(desc(percentage))
+
+summarized_mutation_ID_100percent_ONLY$FILTER <- as.character(summarized_mutation_ID_100percent_ONLY$FILTER)
+
+summarized_mutation_ID_100percent_ONLY
+
+
+```
+
+
+
+
+
+### Distribution of "Other" FILTER type 
+Get the count of AF per each sample
+```{r}
+## add category "Other" for low counts
+summarized_df_other <- summarized_df %>%
+  filter(FILTER_new == "Other") %>%
+  group_by("Tumor_percentage", "Total_DNA")%>%
+  arrange(desc(mean_counts), .by_group = T) %>%    ## reorder the values descending
+  mutate(FILTER = as.factor(FILTER))
+
+summarized_df_other
+```
+
+
+```{r}
+ggdotchart(summarized_df_other, x = "FILTER", y = "mean_counts",
+           color = "Tumor_percentage",                                # Color by groups
+           palette = c("#383F51","#00AFBB", "#F6E27F"), # Custom color palette
+           sorting = "desc",                       # Sort value in descending order
+           add = "segments",                             # Add segments from y = 0 to dots
+           rotate = TRUE,                                # Rotate vertically
+           group = "Tumor_percentage",                                # Order by groups
+           dot.size = 2,                                 # Large dot size
+           #label = round(summarized_df_other$mean_counts),                        # Add mpg values as dot labels
+           #font.label = list(color = "black", size = 8, vjust = 0.5),               # Adjust label parameters
+           ggtheme = theme_pubr(base_size = 8),
+           facet.by = "Total_DNA"
+           ) + 
+  xlab("") +
+  ylab("average counts (n=2)")
+
+```
+
+
+
+
+## AF exploration
+### Histogram of all detected mutations (PASS and Other)
+Lets graph a histogram with the distributions of AF in the samples
+```{r}
+
+gghistogram(df_AF_final, x = "AF",
+   add = "mean", rug = TRUE, add_density = FALSE,
+   bins = 50,
+   color = "Tumor_percentage", fill = "Tumor_percentage",
+   palette = c("#383F51","#00AFBB", "#F6E27F"),
+   facet.by=c("Total_DNA")
+   )
+
+
+gghistogram(df_AF_final, x = "AF",
+   add = "mean", rug = TRUE, add_density = FALSE,
+   bins = 50,
+   color = "Tumor_percentage", fill = "Tumor_percentage",
+   palette = c("#383F51","#00AFBB", "#F6E27F"),
+   facet.by=c("Total_DNA", "Experimenter")
+   )
+```
+
+
+
+
+### histogram of PASS only mutations
+Filter for PASS
+```{r}
+df_AF_final_PASS <- df_AF_final %>%
+  filter(df_AF_final$FILTER == "PASS")
+
+percentage_PASS <- round(nrow(df_AF_final_PASS)/nrow(df_AF_final)*100)
+print(paste0("Total mutation = ", nrow(df_AF_final), " ; PASS mutations = ", nrow(df_AF_final_PASS), " ; (", percentage_PASS, "%)" ))
+```
+
+Plot
+```{r}
+gghistogram(df_AF_final_PASS, x = "AF",
+   add = "mean", rug = TRUE, add_density = FALSE,
+   bins = 50,
+   color = "Tumor_percentage", fill = "Tumor_percentage",
+   palette = c("#383F51","#00AFBB", "#F6E27F"),
+   facet.by=c("Total_DNA")
+   )
+
+
+gghistogram(df_AF_final_PASS, x = "AF",
+   add = "mean", rug = TRUE, add_density = FALSE,
+   bins = 50,
+   color = "Tumor_percentage", fill = "Tumor_percentage",
+   palette = c("#383F51","#00AFBB", "#F6E27F"),
+   facet.by=c("Total_DNA", "Experimenter")
+   )
+```
+
+### Statistics on PASS mutations (Violin plots)
+```{r}
+my_comparisons <- list( c(1, 2), c(1, 3) ) ## pairs to compare
+
+ggviolin(df_AF_final_PASS, x = "Tumor_percentage", y = "AF", fill = "Tumor_percentage",
+         palette = c("#383F51","#00AFBB", "#F6E27F"),
+         add = "boxplot", add.params = list(fill = "white"),
+         facet.by=c("Total_DNA"))+
+  stat_compare_means(comparisons = my_comparisons, label = "p.signif")  # Add significance levels
+
+
+ggviolin(df_AF_final_PASS, x = "Total_DNA", y = "AF", fill = "Total_DNA",
+         palette = c("#383F51","#00AFBB", "#F6E27F"),
+         add = "boxplot", add.params = list(fill = "white"),
+         facet.by=c("Tumor_percentage"))+
+  stat_compare_means(comparisons = my_comparisons, label = "p.signif")  # Add significance levels
+
+```
+
+### How many mutations are below the 5% AF threshold?
+
+```{r}
+df_AF_final_PASS_AF_lower_5_percent <- df_AF_final_PASS %>%
+  select(mutation_ID, Tumor_percentage, Total_DNA, Experimenter, AF) %>%
+  filter(AF>=0.05) %>%
+  group_by( Tumor_percentage, Total_DNA, Experimenter) %>%
+  summarize(count = n()) %>%
+  group_by(Tumor_percentage, Total_DNA) %>%
+  summarize(mean_count =mean(count))
+
+
+
+ggbarplot(df_AF_final_PASS_AF_lower_5_percent, x = "Tumor_percentage", y = "mean_count", fill = "Tumor_percentage",
+         palette = c("#383F51","#00AFBB", "#F6E27F"),
+         add = "boxplot", add.params = list(fill = "white"),
+         facet.by=c("Total_DNA")) +
+         ylab("num of mutations with AF<5%")
+
+
+ggbarplot(df_AF_final_PASS_AF_lower_5_percent, x = "Total_DNA", y = "mean_count", fill = "Total_DNA",
+         palette = c("#383F51","#00AFBB", "#F6E27F"),
+         add = "boxplot", add.params = list(fill = "white"),
+         facet.by=c("Tumor_percentage"))+
+         ylab("num of mutations with AF<5%")
+
+
+```
+
+
+
+
+## Distubution plot of FQV (Fisher Q Value)
+### Histogram of PASS mutations
+
+Lets graph a histogram with the distributions of FPV in the samples
+```{r}
+
+gghistogram(df_AF_final_PASS, x = "FQV",
+   xscale = "log10",
+   add = "mean", rug = TRUE, add_density = FALSE,
+   bins = 60,
+   color = "Tumor_percentage", fill = "Tumor_percentage",
+   palette = c("#383F51","#00AFBB", "#F6E27F"),
+   facet.by=c("Total_DNA")
+   )
+
+
+gghistogram(df_AF_final_PASS, x = "FQV",
+   xscale = "log10",
+   add = "mean", rug = TRUE, add_density = FALSE,
+   bins = 60,
+   color = "Tumor_percentage", fill = "Tumor_percentage",
+   palette = c("#383F51","#00AFBB", "#F6E27F"),
+   facet.by=c("Total_DNA", "Experimenter")
+   )
+```
+### Statistical analysis of FQV using violin plots
+```{r}
+my_comparisons <- list( c(1, 2), c(1, 3) ) ## pairs to compare
+
+ggviolin(df_AF_final_PASS, x = "Tumor_percentage", y = "FQV", fill = "Tumor_percentage",
+         yscale = "log10",
+         palette = c("#383F51","#00AFBB", "#F6E27F"),
+         add = "boxplot", add.params = list(fill = "white"),
+         facet.by=c("Total_DNA"))+
+  stat_compare_means(comparisons = my_comparisons, label = "p.signif")  # Add significance levels
+
+
+
+ggviolin(df_AF_final_PASS, x = "Total_DNA", y = "FQV", fill = "Total_DNA",
+         yscale = "log10",
+         palette = c("#383F51","#00AFBB", "#F6E27F"),
+         add = "boxplot", add.params = list(fill = "white"),
+         facet.by=c("Tumor_percentage"))+
+  stat_compare_means(comparisons = my_comparisons, label = "p.signif")   # Add significance levels
+
+
+
+
+
+```
+
+
+
+## Distubution plot of DP (Depth Coverage)
+### Histogram of PASS mutations
+Lets graph a histogram with the distributions of AF in the samples
+```{r}
+
+gghistogram(df_AF_final_PASS, x = "DP",
+   add = "mean", rug = TRUE, add_density = FALSE,
+   bins = 60,
+   color = "Tumor_percentage", fill = "Tumor_percentage",
+   palette = c("#383F51","#00AFBB", "#F6E27F"),
+   facet.by=c("Tumor_percentage", "Total_DNA")
+   )
+```
+### Statistical analysis of DP using violin plots
+```{r}
+my_comparisons <- list( c(1, 2), c(1, 3) ) ## pairs to compare
+
+ggviolin(df_AF_final_PASS, x = "Tumor_percentage", y = "DP", fill = "Tumor_percentage",
+         palette = c("#383F51","#00AFBB", "#F6E27F"),
+         add = "boxplot", add.params = list(fill = "white"),
+         facet.by=c("Total_DNA"))+
+  stat_compare_means(comparisons = my_comparisons, label = "p.signif")  # Add significance levels
+
+
+
+ggviolin(df_AF_final_PASS, x = "Total_DNA", y = "DP", fill = "Total_DNA",
+         palette = c("#383F51","#00AFBB", "#F6E27F"),
+         add = "boxplot", add.params = list(fill = "white"),
+         facet.by=c("Tumor_percentage"))+
+  stat_compare_means(comparisons = my_comparisons, label = "p.signif")   # Add significance levels
+
+
+```
+
+
+
+
+## What type of mutation changes the most?
+```{r}
+# Extract mutation info
+df_mutation_types <- df_AF_final_PASS %>%
+  select(mutation_ID, Total_DNA, Tumor_percentage, Experimenter, REF, ALT) %>%
+  unite("mutation_type", REF, ALT, sep = ">") %>%
+  group_by(Total_DNA, Tumor_percentage, Experimenter) %>%
+  dplyr::count(mutation_type, name = "counts") %>%
+  ungroup() %>%
+  group_by(Tumor_percentage, mutation_type) %>%
+  summarize(mean_counts = mean(counts)) %>%
+  filter(mean_counts>4)%>% ## threshold to remove low counts
+  arrange(desc(mean_counts))
+
+
+ggbarplot(df_mutation_types, x = "mutation_type", y = "mean_counts", fill = "Tumor_percentage",
+         palette = c("#383F51","#00AFBB", "#F6E27F"),
+         drop = FALSE,
+         position = position_dodge(0.7),
+         #facet.by=c("Tumor_percentage"),
+         ylab = "mean counts (replicates, total DNA)",
+         xlab = "",
+         )+ theme(axis.text.x=element_text(angle = -90, hjust = 0, size = 12))
+```
+
+
+
+
+
+
+
+
+
+## EXTRA Extrapolation of nucleotides counts (FG and BG) from vcf dataframe
+
+```{r eval=FALSE, include=FALSE}
+## extrapolated nucleotide counts for BG
+BG_nucleotide_df <- df_AF_final_PASS %>%
+  select(mutation_ID, Sample, BG) %>%
+  separate(BG, into = c("BG_keys", "BG_values") , sep = ":", remove = FALSE)
+  
+#unique_key <- "A|C|G|T|D|I"
+
+for (unique_key in unique(BG_nucleotide_df$BG_keys)) { ## loops over unique values of the key (""A|C|G|T|D|I" or "AAAGA|AAGGA|ATT|T"")
+  temp_nucleotide_extrapolation_df <- BG_nucleotide_df %>%
+    select(mutation_ID, Sample,BG, BG_keys, BG_values) %>%
+    filter(BG_keys == unique_key)
+  
+  string_colnames <- str_split(unique_key, "\\|")[[1]]  ## generates a string with names for the columns in next step ("A", "C" etc)
+  
+  ## initialization of strings
+  col_names <- c()
+  index_count <- 0
+  
+  for (i in string_colnames) {  ## creates a string with colnames of nucelotide and adds a suffix
+    index_count <- index_count +1
+    col_names[index_count] <- paste0("BG_", i)
+  }
+  
+  temp_nucleotide_extrapolation_df <- temp_nucleotide_extrapolation_df %>% 
+    separate(BG_values, into = col_names, sep = "\\|") %>%
+    select(-BG, -BG_keys)
+  
+  
+  BG_nucleotide_df <- BG_nucleotide_df%>%
+  left_join(temp_nucleotide_extrapolation_df, by = c("mutation_ID", "Sample"), relationship = "many-to-many")
+
+  
+}
+
+BG_nucleotide_df <- BG_nucleotide_df%>%
+    select(-BG_keys, - BG_values, -BG_AAAG, -BG_AAAGA)
+
+BG_nucleotide_df
+
+
+## extrapolated nucleotide counts for FG
+FG_nucleotide_df <- df_AF_final_PASS %>%
+  select(mutation_ID, Sample, FG) %>%
+  separate(FG, into = c("FG_keys", "FG_values") , sep = ":", remove = FALSE)
+  
+#unique_key <- "A|C|G|T|D|I"
+
+for (unique_key in unique(FG_nucleotide_df$FG_keys)) { ## loops over unique values of the key (""A|C|G|T|D|I" or "AAAGA|AAGGA|ATT|T"")
+  temp_nucleotide_extrapolation_df <- FG_nucleotide_df %>%
+    select(mutation_ID, Sample,FG, FG_keys, FG_values) %>%
+    filter(FG_keys == unique_key)
+  
+  string_colnames <- str_split(unique_key, "\\|")[[1]]  ## generates a string with names for the columns in next step ("A", "C" etc)
+  
+  ## initialization of strings
+  col_names <- c()
+  index_count <- 0
+  
+  for (i in string_colnames) {  ## creates a string with colnames of nucelotide and adds a suffix
+    index_count <- index_count +1
+    col_names[index_count] <- paste0("FG_", i)
+  }
+  
+  temp_nucleotide_extrapolation_df <- temp_nucleotide_extrapolation_df %>% 
+    separate(FG_values, into = col_names, sep = "\\|") %>%
+    select(-FG, -FG_keys)
+  
+  
+  FG_nucleotide_df <- FG_nucleotide_df%>%
+  left_join(temp_nucleotide_extrapolation_df, by = c("mutation_ID", "Sample"), relationship = "many-to-many")
+
+  
+}
+
+FG_nucleotide_df <- FG_nucleotide_df%>%
+    select(mutation_ID, Sample, FG_A, FG_C, FG_G, FG_T = `FG_T.x`, FG_D, FG_I)
+
+FG_nucleotide_df
+
+
+
+
+## finally add to the combined table
+
+nucleotide_heatmap_df <- BG_nucleotide_df%>%
+    inner_join(FG_nucleotide_df) %>% 
+    select(-BG)
+
+nucleotide_heatmap_df
+
+
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
