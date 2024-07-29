@@ -1,5 +1,5 @@
 ---
-title: "NGS Oncology: impact of low DNA input and tumor purity"
+title: "NCC OncoPanel: impact of low DNA input and tumor purity"
 author: "Eugenio Graceffo"
 date: "June-July 2024"
 output:
@@ -191,7 +191,7 @@ df <- metadata%>%
 df
 ```
 
-## AF Extrapolation from muton.vcf
+## **AF Extrapolation from muton.vcf
 ### Dataframes containing AF values 
 
 First, lets load up all the .vcf files into a list of dataframes
@@ -493,7 +493,7 @@ vcf_mutation_ID_15ng_ONLY
 
 
 
-## 15ng vs 200ng
+## **15ng vs 200ng
 ### What FILTER do the mutations not found in 200ng get assigned?
 ```{r}
 #df_AF_total
@@ -580,10 +580,17 @@ mutations_15ng_ONLY_SOURCE_ID %>%
 
 ```
 
-
+### What ahappens to the NOTCH1 chr9_139390655_CG_C mutations in the 30ng and 50ng samples?
+```{r}
+NOTCH1_mut <- df_AF_total %>%
+  filter(mutation_ID == "chr9_139390655_CG_C") %>%
+  select(Total_DNA, Tumor_percentage, Experimenter, mutation_ID, GENE, AF, DP, FILTER, SOURCE_ID) %>%
+  arrange(desc(Total_DNA))
+NOTCH1_mut
+```
 
 # Project 2: Impact of tumor purity
-## FILTER type exploration
+## **FILTER type exploration
 ### Distribution of main FILTER types
 
 ```{r}
@@ -708,7 +715,7 @@ ggdotchart(summarized_df_other, x = "FILTER", y = "mean_counts",
 
 
 
-## AF exploration
+## **AF exploration
 ### Histogram of all detected mutations (PASS and Other)
 Lets graph a histogram with the distributions of AF in the samples
 ```{r}
@@ -815,7 +822,7 @@ ggbarplot(df_AF_final_PASS_AF_lower_5_percent, x = "Total_DNA", y = "mean_count"
 
 
 
-## Distubution plot of FQV (Fisher Q Value)
+## **Exploration of FQV (Fisher Q Value)
 ### Histogram of PASS mutations
 
 Lets graph a histogram with the distributions of FPV in the samples
@@ -840,6 +847,8 @@ gghistogram(df_AF_final_PASS, x = "FQV",
    facet.by=c("Total_DNA", "Experimenter")
    )
 ```
+
+
 ### Statistical analysis of FQV using violin plots
 ```{r}
 my_comparisons <- list( c(1, 2), c(1, 3) ) ## pairs to compare
@@ -868,7 +877,7 @@ ggviolin(df_AF_final_PASS, x = "Total_DNA", y = "FQV", fill = "Total_DNA",
 
 
 
-## Distubution plot of DP (Depth Coverage)
+## **Distubution plot of DP (Depth Coverage)
 ### Histogram of PASS mutations
 Lets graph a histogram with the distributions of AF in the samples
 ```{r}
@@ -881,6 +890,7 @@ gghistogram(df_AF_final_PASS, x = "DP",
    facet.by=c("Tumor_percentage", "Total_DNA")
    )
 ```
+
 ### Statistical analysis of DP using violin plots
 ```{r}
 my_comparisons <- list( c(1, 2), c(1, 3) ) ## pairs to compare
@@ -932,15 +942,47 @@ ggbarplot(df_mutation_types, x = "mutation_type", y = "mean_counts", fill = "Tum
 
 
 
+## How many mutations get assigned SOURCE_ID?
+
+```{r}
+df_AF_final_PASS_SOURCE_ID <- df_AF_final_PASS %>%
+  select(mutation_ID, Tumor_percentage, Total_DNA, Experimenter, SOURCE_ID) %>%
+  filter(!is.na(SOURCE_ID)) %>%
+  group_by( Tumor_percentage, Total_DNA, Experimenter) %>%
+  summarize(count = n()) %>%
+  group_by(Tumor_percentage, Total_DNA) %>%
+  summarize(mean_count =mean(count))
+
+
+
+ggbarplot(df_AF_final_PASS_SOURCE_ID, x = "Tumor_percentage", y = "mean_count", fill = "Tumor_percentage",
+         palette = c("#383F51","#00AFBB", "#F6E27F"),
+         add = "boxplot", add.params = list(fill = "white"),
+         facet.by=c("Total_DNA")) +
+         ylab("num of mutations with SOURCE_ID")
+
+
+ggbarplot(df_AF_final_PASS_SOURCE_ID, x = "Total_DNA", y = "mean_count", fill = "Total_DNA",
+         palette = c("#383F51","#00AFBB", "#F6E27F"),
+         add = "boxplot", add.params = list(fill = "white"),
+         facet.by=c("Tumor_percentage"))+
+         ylab("num of mutations with SOURCE_ID")
+
+
+```
 
 
 
 
 
 
-## EXTRA Extrapolation of nucleotides counts (FG and BG) from vcf dataframe
 
 ```{r eval=FALSE, include=FALSE}
+
+
+EXTRA Extrapolation of nucleotides counts (FG and BG) from vcf dataframe
+
+
 ## extrapolated nucleotide counts for BG
 BG_nucleotide_df <- df_AF_final_PASS %>%
   select(mutation_ID, Sample, BG) %>%
@@ -1033,12 +1075,6 @@ nucleotide_heatmap_df
 
 
 ```
-
-
-
-
-
-
 
 
 
